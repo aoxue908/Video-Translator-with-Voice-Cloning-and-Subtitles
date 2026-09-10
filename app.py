@@ -33,7 +33,10 @@ if not hasattr(torchaudio, 'info'):
     def _patched_info(filepath, **kwargs):
         info = sf.info(filepath)
         return FakeAudioMetaData(info.samplerate, info.frames, info.channels)
-    torchaudio.info = _patched_info
+# Patch 4: Windows EventLoopPolicy fix to eliminate WinError 10054 asyncio socket reset
+import asyncio
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 import gradio as gr
 import os
@@ -51,17 +54,32 @@ from melo.api import TTS
 from concurrent.futures import ThreadPoolExecutor
 import ffmpeg
 import nltk
-nltk.download('averaged_perceptron_tagger_eng')
+try:
+    nltk.data.find('taggers/averaged_perceptron_tagger_eng')
+except LookupError:
+    try:
+        nltk.download('averaged_perceptron_tagger_eng', quiet=True)
+    except Exception:
+        pass
 
-def process_upload(video_file, language_choice):
+SUBTITLE_BG_COLORS = {
+    "Black (Opaque) / 黑色 (不透明)": "&H00000000",
+    "Black (Semi-Transparent) / 黑色 (半透明)": "&H80000000",
+    "Dark Gray / 深灰色 (不透明)": "&H00333333",
+    "White / 白色 (不透明)": "&H00FFFFFF",
+    "Navy Blue / 深蓝色 (不透明)": "&H00660000",
+}
+
+def process_upload(video_file, language_choice, enable_sub_bg=True, sub_bg_color="Black (Opaque) / 黑色 (不透明)"):
     if language_choice == None:
         return None, "Language not selected."
     elif video_file == None:
         return None, "Video not uploaded."
     else:
-        return process_video(video_file, language_choice)
+        video_path = video_file.name if hasattr(video_file, 'name') and video_file.name else video_file
+        return process_video(video_path, language_choice, enable_sub_bg, sub_bg_color)
 
-def process_youtube(youtube_url, language_choice):
+def process_youtube(youtube_url, language_choice, enable_sub_bg=True, sub_bg_color="Black (Opaque) / 黑色 (不透明)"):
     if language_choice is None:
         return None, "Language not selected."
     elif youtube_url is None:
@@ -120,9 +138,9 @@ def process_youtube(youtube_url, language_choice):
     if not download_success or not os.path.exists(video_file):
         return None, "Failed to download YouTube video. Please ensure yt-dlp is installed (`pip install -U yt-dlp pytubefix`) or upload the video file directly."
 
-    return process_video(video_file, language_choice)
+    return process_video(video_file, language_choice, enable_sub_bg, sub_bg_color)
 
-def process_video(video_file, language_choice):
+def process_video(video_file, language_choice, enable_sub_bg=True, sub_bg_color="Black (Opaque) / 黑色 (不透明)"):
     # Initialize paths and devices
     ckpt_converter = 'checkpoints_v2/converter'
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -259,19 +277,34 @@ def process_video(video_file, language_choice):
     
         def generate_segment_audio_batch(translation_batch, speaker_id):
             segment_files = []
+            total_duration = audio_clip.duration
             for segment in translation_batch:
                 start, end, translated_text = segment
-                start = round(start, 2)
-                end = min(round(end, 2), audio_clip.duration)
+                start = max(0.0, round(start, 2))
+                end = round(end, 2)
+
+                # Clamp start and end safely within total clip duration
+                if start >= total_duration:
+                    start = max(0.0, total_duration - 0.5)
+                end = min(end, total_duration)
+
+                if end <= start:
+                    end = min(start + 0.5, total_duration)
+
                 segment_path = os.path.join(output_dir, f'segment_{start}_{end}.wav')
                 model.tts_to_file(translated_text, speaker_id, segment_path, speed=speed)
 
-                reference_speaker = AudioFileClip.subclip(audio_clip, start, end)  # This is the voice you want to clone
-                reference_speaker.write_audiofile(f'reference_speaker_{start}_{end}.wav')
+                ref_speaker_file = os.path.join(output_dir, f'reference_speaker_{start}_{end}.wav')
                 try:
-                    target_se, audio_name = se_extractor.get_se(f'reference_speaker_{start}_{end}.wav', tone_color_converter, vad=False)
-                except NotImplementedError:
+                    if start < total_duration and (end - start) > 0.05:
+                        reference_speaker = AudioFileClip.subclip(audio_clip, start, end)
+                        reference_speaker.write_audiofile(ref_speaker_file)
+                        target_se, audio_name = se_extractor.get_se(ref_speaker_file, tone_color_converter, vad=False)
+                    else:
+                        target_se, audio_name = se_extractor.get_se(reference_audio, tone_color_converter, vad=False)
+                except Exception:
                     target_se, audio_name = se_extractor.get_se(reference_audio, tone_color_converter, vad=False)
+
                 # Run the tone color converter
                 encode_message = "@MyShell"
                 tone_color_converter.convert(
@@ -318,11 +351,15 @@ def process_video(video_file, language_choice):
                 subtitle_entries.append((subtitle_counter, previous_end, previous_end + audio_duration, translated_text))
                 subtitle_counter += 1
     
+                # Safe PTS scale calculation
+                seg_duration = max(0.1, end - start)
+                pts_scale = seg_duration / audio_duration if audio_duration > 0 else 1.0
+
                 # Get the corresponding video segment and adjust its speed to match the audio duration
                 video_segment = (
                     ffmpeg
                     .input(reference_video.filename, ss=start, to=end)
-                    .filter('setpts', f'PTS / {(end - start) / audio_duration}')
+                    .filter('setpts', f'PTS / {pts_scale}')
                 )
                 video_segments.append((video_segment, ffmpeg.input(segment_file)))
                 previous_end += audio_duration
@@ -373,11 +410,18 @@ def process_video(video_file, language_choice):
             # Add subtitles to the video
             final_video_with_subs_path = os.path.join(output_dir, f'final_video_with_subs_{speaker_key}.mp4')
             srt_path_ffmpeg = srt_path.replace('\\', '/')
+
+            if enable_sub_bg:
+                bg_color_code = SUBTITLE_BG_COLORS.get(sub_bg_color, "&H00000000")
+                force_style = f"BorderStyle=3,BackColour={bg_color_code},OutlineColour={bg_color_code},Outline=4,FontSize=18,PrimaryColour=&H00FFFFFF"
+            else:
+                force_style = "FontSize=18"
+
             try:
                 (
                     ffmpeg
                     .input(final_video_path)
-                    .output(final_video_with_subs_path, vf=f"subtitles='{srt_path_ffmpeg}':force_style='FontSize=18'")
+                    .output(final_video_with_subs_path, vf=f"subtitles='{srt_path_ffmpeg}':force_style='{force_style}'")
                     .run(overwrite_output=True)
                 )
             except ffmpeg.Error as e:
@@ -391,12 +435,15 @@ def process_video(video_file, language_choice):
 
 # Gradio Interface (Restricted to languages supported by MeloTTS)
 language_choices = ["en", "zh-cn", "es", "fr", "ja", "ko"]
+bg_color_choices = list(SUBTITLE_BG_COLORS.keys())
 
 uploaded_translator = gr.Interface(
     fn=process_upload,
     inputs=[
-        gr.Video(label="Upload a video from your device storage", sources=['upload']),
-        gr.Dropdown(choices=language_choices, label="Choose Language for Translation (Expressed in ISO 639-1 code)")
+        gr.File(label="Upload a video file (.mp4, .mkv, .avi, .mov, .flv, etc.)", file_types=['video', '.mp4', '.mkv', '.avi', '.mov', '.flv', '.webm']),
+        gr.Dropdown(choices=language_choices, value="zh-cn", label="Choose Language for Translation (Expressed in ISO 639-1 code)"),
+        gr.Checkbox(label="开启字幕背景块 (遮挡原视频字幕) / Enable Subtitle Background Box (Mask Original Subtitles)", value=True),
+        gr.Dropdown(choices=bg_color_choices, value="Black (Opaque) / 黑色 (不透明)", label="字幕背景块颜色 / Subtitle Background Color")
     ],
     outputs=[
         gr.Video(label="Translated Video", format='mp4'),
@@ -410,7 +457,9 @@ youtube_translator = gr.Interface(
     fn=process_youtube,
     inputs=[
         gr.Textbox(label="Enter a YouTube video URL"),
-        gr.Dropdown(choices=language_choices, label="Choose Language for Translation (Expressed in ISO 639-1 code)")
+        gr.Dropdown(choices=language_choices, value="zh-cn", label="Choose Language for Translation (Expressed in ISO 639-1 code)"),
+        gr.Checkbox(label="开启字幕背景块 (遮挡原视频字幕) / Enable Subtitle Background Box (Mask Original Subtitles)", value=True),
+        gr.Dropdown(choices=bg_color_choices, value="Black (Opaque) / 黑色 (不透明)", label="字幕背景块颜色 / Subtitle Background Color")
     ],
     outputs=[
         gr.Video(label="Translated Video", format='mp4'),
