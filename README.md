@@ -62,7 +62,7 @@ git clone https://github.com/aoxue908/Video-Translator-with-Voice-Cloning-and-Su
 cd Video-Translator-with-Voice-Cloning-and-Subtitles
 
 # 2. 安装 Python 依赖
-pip install -r requirements.txt
+pip install -r local_requirements.txt
 python -m unidic download
 
 # 3. 启动本地服务

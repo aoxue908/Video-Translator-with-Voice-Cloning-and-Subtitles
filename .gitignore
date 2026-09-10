@@ -76,3 +76,5 @@ outputs_v2/
 *.swo
 .DS_Store
 Thumbs.db
+.gradio/
+processed/

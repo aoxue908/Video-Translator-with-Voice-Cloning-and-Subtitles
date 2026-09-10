@@ -62,15 +62,65 @@ def process_upload(video_file, language_choice):
         return process_video(video_file, language_choice)
 
 def process_youtube(youtube_url, language_choice):
-    if language_choice == None:
+    if language_choice is None:
         return None, "Language not selected."
-    elif youtube_url == None:
+    elif youtube_url is None:
         return None, "YouTube URL not entered."
-    else:
+    
+    video_file = "original.mp4"
+    if os.path.exists(video_file):
+        try:
+            os.remove(video_file)
+        except Exception:
+            pass
+
+    download_success = False
+
+    # Try pytubefix first
+    try:
         yt = YouTube(youtube_url)
-        yt.streams.filter(progressive=True, file_extension='mp4').first().download(filename="original.mp4")
-        video_file = "original.mp4"
-        return process_video(video_file, language_choice)
+        stream = (
+            yt.streams.filter(progressive=True, file_extension='mp4').first()
+            or yt.streams.get_highest_resolution()
+            or yt.streams.filter(file_extension='mp4').first()
+            or yt.streams.first()
+        )
+        if stream:
+            stream.download(filename=video_file)
+            download_success = os.path.exists(video_file)
+    except Exception as e:
+        print(f"pytubefix download failed: {e}, trying yt_dlp...")
+
+    # Fallback to yt_dlp Python library
+    if not download_success or not os.path.exists(video_file):
+        try:
+            import yt_dlp
+            ydl_opts = {
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                'outtmpl': video_file,
+                'quiet': True,
+                'no_warnings': True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([youtube_url])
+            download_success = os.path.exists(video_file)
+        except Exception as e:
+            print(f"yt_dlp python module error: {e}")
+
+    # Fallback to yt-dlp CLI command
+    if not download_success or not os.path.exists(video_file):
+        try:
+            import subprocess
+            cmd = ["yt-dlp", "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best", "-o", video_file, youtube_url]
+            subprocess.run(cmd, check=True)
+            download_success = os.path.exists(video_file)
+        except Exception as e:
+            print(f"yt-dlp CLI fallback error: {e}")
+
+    if not download_success or not os.path.exists(video_file):
+        return None, "Failed to download YouTube video. Please ensure yt-dlp is installed (`pip install -U yt-dlp pytubefix`) or upload the video file directly."
+
+    return process_video(video_file, language_choice)
 
 def process_video(video_file, language_choice):
     # Initialize paths and devices
@@ -85,7 +135,23 @@ def process_video(video_file, language_choice):
     # Process the reference video
     reference_video = VideoFileClip(video_file)
     reference_audio = os.path.join(output_dir, "reference_audio.wav")
-    reference_video.audio.write_audiofile(reference_audio)
+
+    if reference_video.audio is not None:
+        reference_video.audio.write_audiofile(reference_audio)
+    else:
+        # Try extracting audio using ffmpeg directly
+        try:
+            (
+                ffmpeg
+                .input(video_file)
+                .output(reference_audio, acodec='pcm_s16le', ac=1, ar='48000')
+                .run(overwrite_output=True, capture_stdout=True, capture_stderr=True)
+            )
+        except ffmpeg.Error:
+            return None, "The selected video file does not contain any audio track to translate."
+
+    if not os.path.exists(reference_audio) or os.path.getsize(reference_audio) == 0:
+        return None, "Failed to extract audio track from video."
     audio = AudioSegment.from_file(reference_audio)
     resampled_audio = audio.set_frame_rate(48000)
     resampled_audio.export(reference_audio, format="wav")
@@ -140,16 +206,18 @@ def process_video(video_file, language_choice):
 
         # Add subtitles to the video
         final_video_with_subs_path = os.path.join(output_dir, f'final_video_with_subs.mp4')
+        srt_path_ffmpeg = srt_path.replace('\\', '/')
         try:
             (
                 ffmpeg
                 .input(video_file)
-                .output(final_video_with_subs_path, vf=f"subtitles={srt_path}:force_style='Fontname=Noto Sans CJK SC,FontSize=18'")
+                .output(final_video_with_subs_path, vf=f"subtitles='{srt_path_ffmpeg}':force_style='FontSize=18'")
                 .run(overwrite_output=True)
             )
         except ffmpeg.Error as e:
             print('ffmpeg error:', e)
-            print(e.stderr.decode('utf-8'))
+            if getattr(e, 'stderr', None):
+                print(e.stderr.decode('utf-8', errors='ignore'))
 
         print(f"Final video with subtitles saved to: {final_video_with_subs_path}")
         return final_video_with_subs_path, "Video language and language selection are the same, audio not changed."
@@ -279,7 +347,8 @@ def process_video(video_file, language_choice):
                 )
             except ffmpeg.Error as e:
                 print('ffmpeg error:', e)
-                print(e.stderr.decode('utf-8'))
+                if getattr(e, 'stderr', None):
+                    print(e.stderr.decode('utf-8', errors='ignore'))
     
             print(f"Final video without subtitles saved to: {final_video_path}")
     
@@ -303,24 +372,25 @@ def process_video(video_file, language_choice):
     
             # Add subtitles to the video
             final_video_with_subs_path = os.path.join(output_dir, f'final_video_with_subs_{speaker_key}.mp4')
+            srt_path_ffmpeg = srt_path.replace('\\', '/')
             try:
                 (
                     ffmpeg
                     .input(final_video_path)
-                    .output(final_video_with_subs_path, vf=f"subtitles={srt_path}:force_style='Fontname=Noto Sans CJK SC,FontSize=18'")
+                    .output(final_video_with_subs_path, vf=f"subtitles='{srt_path_ffmpeg}':force_style='FontSize=18'")
                     .run(overwrite_output=True)
                 )
             except ffmpeg.Error as e:
                 print('ffmpeg error:', e)
-                print(e.stderr.decode('utf-8'))
+                if getattr(e, 'stderr', None):
+                    print(e.stderr.decode('utf-8', errors='ignore'))
     
             print(f"Final video with subtitles saved to: {final_video_with_subs_path}")
     
             return final_video_with_subs_path, "Video successfully translated."
 
-#Gradio Interface
-language_choices = ts.get_languages("google")["en"]
-language_choices.remove("auto")
+# Gradio Interface (Restricted to languages supported by MeloTTS)
+language_choices = ["en", "zh-cn", "es", "fr", "ja", "ko"]
 
 uploaded_translator = gr.Interface(
     fn=process_upload,
