@@ -31,4 +31,4 @@ gruut>=2.2.3
 g2p_en>=2.1.0
 anyascii>=0.3.3
 jaconv>=0.3.4
-git+https://github.com/myshell-ai/MeloTTS.git@main#egg=MeloTTS
+
