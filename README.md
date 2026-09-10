@@ -10,7 +10,6 @@ app_file: app.py
 pinned: false
 license: mit
 ---
-
 # 🎥 Video Translator with Voice Cloning & Subtitles
 
 视频自动翻译、音色克隆与双语字幕压制系统。结合 **OpenAI Whisper** 语音识别、**Google Translate** 文本翻译、**MeloTTS** 语音合成、**OpenVoice v2** 零样本音色克隆以及 **FFmpeg** 高清中日韩字幕压制。
@@ -24,6 +23,9 @@ license: mit
 ### 🔹 单元格 1：环境与依赖一键准备（仅需运行一次）
 
 ```bash
+%cd /content
+!rm -rf Video-Translator-with-Voice-Cloning-and-Subtitles
+
 # 1. 克隆代码仓库并拉取 LFS 模型权重
 !git clone https://github.com/aoxue908/Video-Translator-with-Voice-Cloning-and-Subtitles.git /content/Video-Translator-with-Voice-Cloning-and-Subtitles
 %cd /content/Video-Translator-with-Voice-Cloning-and-Subtitles
@@ -43,7 +45,7 @@ license: mit
 
 ```bash
 %cd /content/Video-Translator-with-Voice-Cloning-and-Subtitles
-!python app.py
+!python app.py --share
 ```
 
 > 💡 运行后日志中会输出 `Running on public URL: https://xxxx.gradio.live`，点击公网链接即可在浏览器中开始使用！
@@ -66,6 +68,7 @@ python -m unidic download
 # 3. 启动本地服务
 python app.py
 ```
+
 启动后在浏览器中打开 `http://127.0.0.1:7860` 即可使用。
 
 ---
